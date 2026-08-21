@@ -247,6 +247,20 @@ def _nearest_cell(cells, target_x0, tol=15):
 
 JAPANESE_CHAR_RE = re.compile(r"[一-龠ぁ-んァ-ヶｦ-ﾟ]")
 
+# 年最大〜順位表の観測所名ラベル行と誤認しやすい、表自体の見出し語
+# (「順位」「雨量」「年」「月」「日」等が別トークンとして1行に並ぶことがある)
+_RANK_TABLE_HEADER_WORDS = {"順位", "雨量", "年", "月", "日", "年月日", "項目", "時間"}
+
+
+def _station_label_from_row(texts):
+    """観測所名ラベル行かどうかを判定する。「新富」「(道)」のように名前が
+    複数トークンに分かれることがあるため全トークンを連結して判定するが、
+    表見出し語だけの行(「順位」「雨量」「年」「月」「日」等)は除外する。"""
+    if not texts or all(t in _RANK_TABLE_HEADER_WORDS for t in texts):
+        return None
+    joined = "".join(texts)
+    return joined if JAPANESE_CHAR_RE.search(joined) else None
+
 
 def parse_nenmax_nichi(pdf_paths):
     """年最大日雨量順位表。1ページが7列に分かれ、各列は独立して観測所が
@@ -284,10 +298,12 @@ def parse_nenmax_nichi(pdf_paths):
                     col_station = None
                     for _, cells in col_rows:
                         texts = [c[1] for c in cells]
-                        if len(texts) == 1 and JAPANESE_CHAR_RE.search(texts[0]):
-                            col_station = texts[0]
+                        if cells and not cells[0][1].isdigit():
+                            label = _station_label_from_row(texts)
+                            if label:
+                                col_station = label
                             continue
-                        if len(cells) < 2 or not cells[0][1].isdigit():
+                        if len(cells) < 2:
                             continue  # 前日/翌日の補足行、またはヘッダ行
                         rank_text = cells[0][1]
                         rain_text = cells[1][1]
@@ -375,11 +391,13 @@ def parse_nenmax_jikan_rank1(pdf_paths):
             station_at_index = {}  # data_row_idx(0始まり) -> 観測所名(順位1の行のみ記録)
             for _, cells in body_rows:
                 texts = [c[1] for c in cells]
-                if len(texts) == 1 and JAPANESE_CHAR_RE.search(texts[0]):
-                    pending_station = texts[0]
+                if not cells:
                     continue
-                if not cells or not cells[0][1].isdigit():
-                    continue  # ヘッダ行や解析不能な行
+                if not cells[0][1].isdigit():
+                    label = _station_label_from_row(texts)
+                    if label:
+                        pending_station = label
+                    continue  # ヘッダ行やラベル行(数値データではない)
                 data_row_idx += 1
                 if pending_station is None:
                     continue  # 順位2以降の行(順位1のみ対象なのでスキップ)
@@ -451,6 +469,159 @@ def parse_nenmax_jikan_rank1(pdf_paths):
             pdf.close()
 
     print(f"nenmax_jikan_rank1 rows parsed: {len(rows_out)} from {[p.name for p in pdf_paths]}")
+    return rows_out
+
+
+def _extract_duration_values(cells, header_words, durations):
+    """1行分のセル(x0付き)を、時間区分の見出しx0を基準に区分ごとへ振り分けて
+    (雨量, 年月日)を取り出す。年月日の内訳(元号/年/月日)はpdfplumberの単語分割の
+    都合で1〜3トークンにばらつく(例:「H」「7.10.16」の2トークンだったり
+    「S」「27.」「9.17」の3トークンだったりする)ため、値の個数を固定せず、
+    各セルのx0がどの区分の範囲に収まるかで判定する(先頭セル=雨量、残り=年月日)。"""
+    xs = [w["x0"] for w in header_words]
+    n = len(xs)
+    bounds = []
+    for idx, x0 in enumerate(xs):
+        spacing = (xs[idx + 1] - x0) if idx + 1 < n else (xs[idx] - xs[idx - 1] if idx > 0 else 77.5)
+        bounds.append((x0 - spacing / 3, x0 + spacing * 2 / 3))
+
+    buckets = [[] for _ in range(n)]
+    for x0, text in cells:
+        for bi, (lo, hi) in enumerate(bounds):
+            if lo <= x0 < hi:
+                buckets[bi].append(text)
+                break
+
+    out = []
+    for di, dur in enumerate(durations):
+        tokens = buckets[di] if di < len(buckets) else []
+        if not tokens:
+            continue
+        try:
+            rain_val = int(tokens[0])
+        except ValueError:
+            continue
+        date_parts = [p for p in tokens[1:] if p not in ("", "-")]
+        date_text = " ".join(date_parts) if date_parts else None
+        out.append((dur, rain_val, date_text))
+    return out
+
+
+def parse_nenmax_jikan_all(pdf_paths):
+    """年最大時間雨量順位表の全順位を取得する(Excel出力専用。rainfall.db/Webアプリには
+    組み込まない)。parse_nenmax_jikan_rank1と同じページ構成(短時間側ページ+直後の
+    長時間側続きページ)を読むが、以下の点が異なる:
+    - 観測所名は「次の観測所名ラベルが現れるまで」ページをまたいで持ち越す
+      (1観測所の順位が1ページ(組)に収まらない場合、次ページの続きも同じ観測所として扱う)。
+    - 順位1に限らず全ての行を対象とし、雨量値とあわせて年月日も記録する。"""
+    rows_out = []
+    current_region = None
+    current_station = None
+    pages_all = []
+    page_source = []
+    opened = [pdfplumber.open(p) for p in pdf_paths]
+    for pdf, path in zip(opened, pdf_paths):
+        pages_all.extend(pdf.pages)
+        fname = Path(path).name
+        page_source.extend((fname, n) for n in range(1, len(pdf.pages) + 1))
+
+    try:
+        i = 0
+        while i < len(pages_all):
+            words = pages_all[i].extract_words()
+            if not words:
+                i += 1
+                continue
+            rank_words = [w for w in words if w["text"] == "順位"]
+            is_short_page = bool(rank_words) and any(
+                w["text"] == "時間" and w["x0"] < 100 for w in words
+            )
+            if not is_short_page:
+                i += 1
+                continue
+
+            region_word = next((w["text"] for w in words if "振興局" in w["text"]), None)
+            if region_word:
+                current_region = region_word
+
+            header_dur_words = _topmost_group(words, lambda w: DURATION_TOKEN_RE.match(w["text"]))
+            durations_short = [w["text"] for w in header_dur_words]
+
+            rank_header_top = min(w["top"] for w in rank_words)
+            body_rows = _rows_from_words(
+                [w for w in words if w["top"] > rank_header_top + 3], top_tol=3
+            )
+
+            data_row_idx = -1
+            row_at_index = {}  # data_row_idx -> (観測所名, 順位)
+            for _, cells in body_rows:
+                texts = [c[1] for c in cells]
+                if not cells:
+                    continue
+                if not cells[0][1].isdigit():
+                    label = _station_label_from_row(texts)
+                    if label:
+                        current_station = label
+                    continue  # ヘッダ行やラベル行(数値データではない)
+                data_row_idx += 1
+                if current_station is None:
+                    continue
+                rank = int(cells[0][1])
+                row_at_index[data_row_idx] = (current_station, rank)
+
+                for dur, rain_val, date_text in _extract_duration_values(
+                    cells[1:], header_dur_words, durations_short
+                ):
+                    rows_out.append({
+                        "name": current_station,
+                        "region": current_region,
+                        "rank": rank,
+                        "duration": dur,
+                        "value_mm": rain_val,
+                        "date": date_text,
+                        "source_file": page_source[i][0],
+                        "source_page": page_source[i][1],
+                    })
+
+            if i + 1 < len(pages_all) and row_at_index:
+                long_words = pages_all[i + 1].extract_words()
+                has_rank_col = any(w["text"] == "順位" for w in long_words)
+                long_dur_words = _topmost_group(long_words, lambda w: DURATION_TOKEN_RE.match(w["text"]))
+                is_long_page = bool(long_words) and not has_rank_col and bool(long_dur_words)
+                if is_long_page:
+                    durations_long = [w["text"] for w in long_dur_words]
+                    dur_header_top = long_dur_words[0]["top"]
+                    subheader_words = [w for w in long_words if w["text"] in ("雨量", "年月日")]
+                    subheader_top = (
+                        min(w["top"] for w in subheader_words) if subheader_words else dur_header_top + 10
+                    )
+                    long_body_rows = _rows_from_words(
+                        [w for w in long_words if w["top"] > subheader_top + 3], top_tol=3
+                    )
+                    for ri, (_, cells) in enumerate(long_body_rows):
+                        if ri not in row_at_index:
+                            continue
+                        name, rank = row_at_index[ri]
+                        for dur, rain_val, date_text in _extract_duration_values(
+                            cells, long_dur_words, durations_long
+                        ):
+                            rows_out.append({
+                                "name": name,
+                                "region": current_region,
+                                "rank": rank,
+                                "duration": dur,
+                                "value_mm": rain_val,
+                                "date": date_text,
+                                "source_file": page_source[i + 1][0],
+                                "source_page": page_source[i + 1][1],
+                            })
+                    i += 1
+            i += 1
+    finally:
+        for pdf in opened:
+            pdf.close()
+
+    print(f"nenmax_jikan_all rows parsed: {len(rows_out)} from {[p.name for p in pdf_paths]}")
     return rows_out
 
 
