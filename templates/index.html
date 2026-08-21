@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>北海道大雨資料 観測所データ検索</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+<header>
+  <h1>北海道大雨資料 観測所データ検索</h1>
+  <p class="sub">住所を入力するか、地図をクリックして位置を指定してください</p>
+</header>
+
+<div class="search-bar">
+  <input type="text" id="address-input" placeholder="例: 札幌市中央区北2条西18">
+  <button id="search-btn">検索</button>
+  <span id="search-status"></span>
+</div>
+
+<main>
+  <div id="map"></div>
+
+  <div id="side-panel">
+    <section id="nearest-list">
+      <h2>近郊観測所</h2>
+      <ol id="nearest-ol"></ol>
+    </section>
+
+    <section id="detail-panel" class="hidden">
+      <h2 id="detail-name"></h2>
+      <p id="detail-basic"></p>
+
+      <div class="highlight-box">
+        <div class="highlight-item">
+          <div class="highlight-label">100年確率日雨量</div>
+          <div class="highlight-value" id="hl-nichi">-</div>
+        </div>
+        <div class="highlight-item">
+          <div class="highlight-label">100年確率24時間雨量</div>
+          <div class="highlight-value" id="hl-jikan24">-</div>
+        </div>
+        <div class="highlight-item">
+          <div class="highlight-label">年最大日雨量</div>
+          <div class="highlight-value" id="hl-nenmax-nichi">-</div>
+        </div>
+        <div class="highlight-item">
+          <div class="highlight-label">年最大24時間雨量</div>
+          <div class="highlight-value" id="hl-nenmax-jikan24">-</div>
+        </div>
+      </div>
+
+      <h3>確率日雨量表 (mm)</h3>
+      <table id="table-nichi"><thead></thead><tbody></tbody></table>
+
+      <h3>確率時間雨量表 (mm)</h3>
+      <div class="table-scroll">
+        <table id="table-jikan"><thead></thead><tbody></tbody></table>
+      </div>
+
+      <h3>確率雨量強度曲線図（君島式 I = a/(t+b)<sup>n</sup> による計算値）</h3>
+      <canvas id="curve-canvas" width="640" height="420"></canvas>
+
+      <h3>年最大日雨量順位表(上位20位)</h3>
+      <div class="edition-tabs">
+        <button class="edition-tab active" data-target="nenmax-nichi" data-edition="15">第15編</button>
+        <button class="edition-tab" data-target="nenmax-nichi" data-edition="14">第14編</button>
+      </div>
+      <div class="table-scroll">
+        <table id="table-nenmax-nichi"><thead></thead><tbody></tbody></table>
+      </div>
+
+      <h3>年最大時間雨量順位表(順位1・過去最大値)</h3>
+      <p class="hint">下段は出典PDFファイル名とページ番号(順位2以下を調べる際に参照)</p>
+      <div class="edition-tabs">
+        <button class="edition-tab active" data-target="nenmax-jikan" data-edition="15">第15編</button>
+        <button class="edition-tab" data-target="nenmax-jikan" data-edition="14">第14編</button>
+      </div>
+      <div class="table-scroll">
+        <table id="table-nenmax-jikan"><thead></thead><tbody></tbody></table>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
