@@ -4,14 +4,17 @@
 観測所調書ページと、別種の「時間雨量調書(欠測状況等)」ページが交互に出現するため、
 緯度経度が載っている観測所調書ページだけを判定して抽出する。
 """
+import io
 import re
 import sqlite3
 from pathlib import Path
 
 import pdfplumber
+from PIL import Image
 from pypdf import PdfReader
 
-SRC_DIR = Path(__file__).parent.parent
+# 元PDFは作業整理のため "実装済(保管場所)/大雨資料検索/" に移動済み
+SRC_DIR = Path(__file__).parent.parent / "実装済(保管場所)" / "大雨資料検索"
 OUT_DIR = Path(__file__).parent
 DB_PATH = OUT_DIR / "rainfall.db"
 
@@ -454,12 +457,16 @@ def parse_nenmax_jikan_rank1(pdf_paths):
 def parse_kyokusen():
     """確率雨量強度曲線図(君島式 I=a/(t+b)^n の係数表)を解析する。
     ページ内では「観測所名がまとまって先に出現→Y a n bの表がその順で後に出現」という
-    構成のため、観測所名を溜めておくキューとして扱い、表が出現するたびに1つずつ消費する。"""
+    構成のため、観測所名を溜めておくキューとして扱い、表が出現するたびに1つずつ消費する。
+    あわせて、各表がどのページに載っているかを image_sources に記録する
+    (グラフ画像の切り出しに使う。build_kyokusen_images参照。ページ内の
+    上下位置との対応はpdfplumber側の座標で別途判定するため、ここではページ番号のみでよい)。"""
     reader = PdfReader(KYOKUSEN_PDF)
     name_queue = []
     rows = []
+    image_sources = []
     table_count = 0
-    for page in reader.pages:
+    for page_index, page in enumerate(reader.pages):
         text = page.extract_text()
         if not text:
             continue
@@ -470,6 +477,7 @@ def parse_kyokusen():
             if ln == "Y a n b":
                 table_count += 1
                 name = name_queue.pop(0) if name_queue else None
+                image_sources.append({"name": name, "page_index": page_index})
                 for j in range(1, 11):
                     if i + j >= len(lines):
                         break
@@ -492,7 +500,73 @@ def parse_kyokusen():
                 name_queue.append(ln)
             i += 1
     print(f"kyokusen tables: {table_count}, rows: {len(rows)}, names left unused in queue: {len(name_queue)}")
-    return rows
+    return rows, image_sources
+
+
+def build_kyokusen_images(image_sources):
+    """確率雨量強度曲線図から、観測所ごとのグラフ画像(表+曲線図)を切り出す。
+    このPDFのページには/Rotate=270が設定されているが、pdfplumberの
+    page.crop().to_image() はこの回転を正しく反映しない(切り出し単体だと
+    向きが崩れて描画される)ため、まずページ全体を素の(未回転)ピクセル座標で
+    ラスタライズしてから、そのピクセル画像を矩形単位で切り出し、270度回転して
+    補正する(page.rects の大枠矩形をピクセル座標に単純スケールするだけで一致することを
+    実データで確認済み)。
+
+    どのパネル(通常1ページに上下2観測所分)がどの観測所かは、
+    parse_kyokusen()のページ内出現順(panel_idx、pypdfのテキスト読み取り順)には
+    依存しない。実データで検証した結果、このPDFはpypdfの読み取り順と
+    ページ上の上下位置が一致しない(下側のパネルが先に読み取られる)ことが
+    あったため、pdfplumberの単語座標から観測所名ラベルの位置を直接特定し、
+    その位置を含む矩形と対応付ける(座標に基づく判定なので順序に依存せず確実)。
+    なお、この資料のpdfplumber抽出は文字列が反転する既知の癖があるため、
+    反転前後の両方で観測所名との一致を試みる。"""
+    resolution = 200
+    scale = resolution / 72
+    images = {}
+    by_page = {}
+    for src in image_sources:
+        if src["name"]:
+            by_page.setdefault(src["page_index"], set()).add(src["name"])
+
+    with pdfplumber.open(KYOKUSEN_PDF) as pdf:
+        for page_index, names in by_page.items():
+            page = pdf.pages[page_index]
+            # ページには他にも軸枠(約401x267)や係数表の枠(約176x143)など
+            # 50x50を超える矩形が複数あるため、パネル外枠(約467x345)だけに
+            # 絞れる閾値で判定する(全ページでちょうど1ページ2枠、最終ページのみ1枠)。
+            big_rects = sorted(
+                (r for r in page.rects if (r["x1"] - r["x0"]) > 450 and (r["bottom"] - r["top"]) > 300),
+                key=lambda r: r["top"],
+            )
+            if not big_rects:
+                continue
+
+            name_top = {}
+            for w in page.extract_words():
+                txt = w["text"]
+                if txt in names:
+                    name_top[txt] = w["top"]
+                elif txt[::-1] in names:
+                    name_top[txt[::-1]] = w["top"]
+
+            full_img = page.to_image(resolution=resolution).original
+            for rect in big_rects:
+                matched_name = next(
+                    (nm for nm, top in name_top.items() if rect["top"] - 5 <= top <= rect["bottom"] + 5),
+                    None,
+                )
+                if matched_name is None:
+                    continue
+                box = (
+                    int(rect["x0"] * scale), int(rect["top"] * scale),
+                    int(rect["x1"] * scale), int(rect["bottom"] * scale),
+                )
+                crop = full_img.crop(box).transpose(Image.ROTATE_270)
+                buf = io.BytesIO()
+                crop.save(buf, format="PNG")
+                images[matched_name] = buf.getvalue()
+    print(f"kyokusen images: {len(images)}")
+    return images
 
 
 def parse_kakuritsu_jikan():
@@ -617,10 +691,23 @@ def main():
             name TEXT, nengen INTEGER, a REAL, n REAL, b REAL
         )
     """)
-    rows = _normalize_names(parse_kyokusen(), station_names)
+    rows, image_sources = parse_kyokusen()
+    rows = _normalize_names(rows, station_names)
     cur.executemany(
         "INSERT INTO kyokusen_keisu VALUES (:name,:nengen,:a,:n,:b)",
         rows,
+    )
+
+    cur.execute("""
+        CREATE TABLE kyokusen_images (
+            name TEXT PRIMARY KEY, image BLOB
+        )
+    """)
+    image_sources = _normalize_names(image_sources, station_names)
+    images = build_kyokusen_images(image_sources)
+    cur.executemany(
+        "INSERT INTO kyokusen_images VALUES (:name,:image)",
+        [{"name": name, "image": png_bytes} for name, png_bytes in images.items()],
     )
 
     cur.execute("""

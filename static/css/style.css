@@ -93,6 +93,7 @@ table th { background: #f0f0f0; }
 .table-scroll { overflow-x: auto; max-width: 100%; }
 
 #curve-canvas { border: 1px solid #ddd; background: white; max-width: 100%; }
+#curve-image { border: 1px solid #ddd; background: white; max-width: 100%; height: auto; }
 
 .edition-tabs { margin: 8px 0 4px; }
 .edition-tab {

@@ -204,80 +204,16 @@ function renderJikanTable(jikan) {
 }
 
 async function drawCurve(name) {
-  const canvas = document.getElementById("curve-canvas");
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const img = document.getElementById("curve-image");
+  img.src = `/api/curve_image/${encodeURIComponent(name)}`;
+  img.classList.remove("hidden");
+  img.onerror = () => { img.classList.add("hidden"); };
 
   const res = await fetch(`/api/curve/${encodeURIComponent(name)}`);
   if (!res.ok) {
-    ctx.fillText("曲線データがありません", 20, 20);
     renderKyokusenCalcTable(null);
     return;
   }
   const data = await res.json();
-  const curves = data.curves;
-  renderKyokusenCalcTable(curves);
-
-  const padL = 50, padB = 40, padT = 20, padR = 20;
-  const w = canvas.width - padL - padR;
-  const h = canvas.height - padT - padB;
-
-  const minT = 0.5, maxT = 4.0;
-  const inRange = (p) => p.t >= minT && p.t <= maxT;
-  const allI = curves.flatMap((c) => [
-    ...c.points.map((p) => p.i),
-    ...(c.observed || []).filter(inRange).map((p) => p.i),
-  ]);
-  const maxI = Math.max(...allI, 10);
-
-  function xOf(t) { return padL + ((t - minT) / (maxT - minT)) * w; }
-  function yOf(i) { return padT + h - (i / maxI) * h; }
-
-  // 軸
-  ctx.strokeStyle = "#333";
-  ctx.beginPath();
-  ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + h); ctx.lineTo(padL + w, padT + h);
-  ctx.stroke();
-  ctx.fillStyle = "#333";
-  ctx.font = "11px sans-serif";
-  ctx.fillText("雨量強度 (mm/hr)", 4, 12);
-  ctx.fillText("時間 (hr)", padL + w - 40, padT + h + 30);
-  for (let t = 0.5; t <= 4.0; t += 0.5) {
-    const x = xOf(t);
-    ctx.fillText(t.toString(), x - 5, padT + h + 14);
-  }
-  for (let i = 0; i <= maxI; i += Math.ceil(maxI / 8)) {
-    const y = yOf(i);
-    ctx.fillText(i.toString(), padL - 30, y + 3);
-  }
-
-  const colors = ["#c0392b", "#d35400", "#e67e22", "#f39c12", "#27ae60",
-                  "#16a085", "#2980b9", "#8e44ad", "#2c3e50", "#7f8c8d"];
-  curves.forEach((c, idx) => {
-    ctx.strokeStyle = colors[idx % colors.length];
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    c.points.forEach((p, i) => {
-      const x = xOf(p.t), y = yOf(p.i);
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-
-    // 実測値(確率時間雨量表)を□マーカーで重ね描き。曲線は広い時間帯の回帰式のため、
-    // 短時間側では実測点とややずれることがある(元のPDF図も点と曲線を並記している)。
-    ctx.fillStyle = "#fff";
-    ctx.strokeStyle = colors[idx % colors.length];
-    ctx.lineWidth = 1;
-    (c.observed || []).filter(inRange).forEach((p) => {
-      const x = xOf(p.t), y = yOf(p.i);
-      ctx.fillRect(x - 3, y - 3, 6, 6);
-      ctx.strokeRect(x - 3, y - 3, 6, 6);
-    });
-
-    const last = c.points[c.points.length - 1];
-    ctx.fillStyle = colors[idx % colors.length];
-    ctx.fillText(`Y=${c.nengen}`, xOf(last.t) - 30, yOf(last.i) - 4);
-  });
+  renderKyokusenCalcTable(data.curves);
 }
