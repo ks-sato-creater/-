@@ -194,9 +194,13 @@ async function drawCurve(name) {
   const w = canvas.width - padL - padR;
   const h = canvas.height - padT - padB;
 
-  const allI = curves.flatMap((c) => c.points.map((p) => p.i));
-  const maxI = Math.max(...allI, 10);
   const minT = 0.5, maxT = 4.0;
+  const inRange = (p) => p.t >= minT && p.t <= maxT;
+  const allI = curves.flatMap((c) => [
+    ...c.points.map((p) => p.i),
+    ...(c.observed || []).filter(inRange).map((p) => p.i),
+  ]);
+  const maxI = Math.max(...allI, 10);
 
   function xOf(t) { return padL + ((t - minT) / (maxT - minT)) * w; }
   function yOf(i) { return padT + h - (i / maxI) * h; }
@@ -230,6 +234,18 @@ async function drawCurve(name) {
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.stroke();
+
+    // 実測値(確率時間雨量表)を□マーカーで重ね描き。曲線は広い時間帯の回帰式のため、
+    // 短時間側では実測点とややずれることがある(元のPDF図も点と曲線を並記している)。
+    ctx.fillStyle = "#fff";
+    ctx.strokeStyle = colors[idx % colors.length];
+    ctx.lineWidth = 1;
+    (c.observed || []).filter(inRange).forEach((p) => {
+      const x = xOf(p.t), y = yOf(p.i);
+      ctx.fillRect(x - 3, y - 3, 6, 6);
+      ctx.strokeRect(x - 3, y - 3, 6, 6);
+    });
+
     const last = c.points[c.points.length - 1];
     ctx.fillStyle = colors[idx % colors.length];
     ctx.fillText(`Y=${c.nengen}`, xOf(last.t) - 30, yOf(last.i) - 4);
