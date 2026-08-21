@@ -105,7 +105,35 @@ async function showStationDetail(name) {
   renderJikanTable(data.kakuritsu_jikan);
   renderNenmaxNichiTable("15");
   renderNenmaxJikanTable("15");
+  renderKyokusenCoefTable(data.kyokusen_keisu);
   drawCurve(name);
+}
+
+function renderKyokusenCoefTable(rows) {
+  const table = document.getElementById("table-kyokusen-coef");
+  const thead = "<tr><th>確率年</th><th>a</th><th>n</th><th>b</th></tr>";
+  const tbody = rows && rows.length
+    ? rows.map((r) => `<tr><td>${r.nengen}</td><td>${r.a}</td><td>${r.n}</td><td>${r.b}</td></tr>`).join("")
+    : `<tr><td colspan="4">データがありません</td></tr>`;
+  table.querySelector("thead").innerHTML = thead;
+  table.querySelector("tbody").innerHTML = tbody;
+}
+
+const CALC_HOURS = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0];
+
+function renderKyokusenCalcTable(curves) {
+  const table = document.getElementById("table-kyokusen-calc");
+  const thead = `<tr><th>確率年＼時間(hr)</th>${CALC_HOURS.map((h) => `<th>${h}</th>`).join("")}</tr>`;
+  const tbody = curves && curves.length
+    ? curves.map((c) => {
+        const byT = {};
+        c.points.forEach((p) => { byT[p.t] = p.i; });
+        const cells = CALC_HOURS.map((h) => `<td>${byT[h] ?? "-"}</td>`).join("");
+        return `<tr><th>Y=${c.nengen}</th>${cells}</tr>`;
+      }).join("")
+    : `<tr><td colspan="${CALC_HOURS.length + 1}">データがありません</td></tr>`;
+  table.querySelector("thead").innerHTML = thead;
+  table.querySelector("tbody").innerHTML = tbody;
 }
 
 function renderNenmaxNichiTable(edition) {
@@ -185,10 +213,12 @@ async function drawCurve(name) {
   const res = await fetch(`/api/curve/${encodeURIComponent(name)}`);
   if (!res.ok) {
     ctx.fillText("曲線データがありません", 20, 20);
+    renderKyokusenCalcTable(null);
     return;
   }
   const data = await res.json();
   const curves = data.curves;
+  renderKyokusenCalcTable(curves);
 
   const padL = 50, padB = 40, padT = 20, padR = 20;
   const w = canvas.width - padL - padR;
