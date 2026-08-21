@@ -68,8 +68,10 @@ def parse_stations():
         if not text:
             continue
         lines = [ln for ln in text.split("\n")]
-        # 登録所ページ判定: 見出し行があるページのみ対象
-        if "観測所名" not in text or "緯度" not in text:
+        # 登録所ページ判定: 見出し行があるページのみ対象。
+        # ページによっては見出し「観測所」が字間に全角スペースを挟んで
+        # 抽出される(例:"観　　測　　所")ため、\sを許容するパターンで判定する。
+        if not re.search(r"観\s*測\s*所", text) or "緯度" not in text:
             continue
 
         i = 0
@@ -542,6 +544,33 @@ def parse_kakuritsu_jikan():
     return rows_out
 
 
+def _resolve_station_name(raw_name, station_names):
+    """他表の観測所名(末尾「*」=統計年数30年未満、「(道)」=北海道所管等の注記)を
+    stations表の正式名(緯度経度の分かる正式な行)に解決する。
+    「(道)」は稀に別地点を指す(例:石狩と石狩(道)は緯度経度が異なる別観測所)ため、
+    注記付きのまま完全一致するか(=それ自体が正式な別観測所)をまず試し、
+    一致する場合に限って段階的に注記を外して再度完全一致を試みる。
+    どの段階でも一致しなければ、元の表記のまま返す(不一致は不一致のまま残す)。"""
+    if raw_name is None or raw_name in station_names:
+        return raw_name
+    name = raw_name
+    if name.endswith("*"):
+        name = name[:-1]
+        if name in station_names:
+            return name
+    if name.endswith("(道)"):
+        name = name[:-3]
+        if name in station_names:
+            return name
+    return raw_name
+
+
+def _normalize_names(rows, station_names):
+    for r in rows:
+        r["name"] = _resolve_station_name(r["name"], station_names)
+    return rows
+
+
 def main():
     if DB_PATH.exists():
         DB_PATH.unlink()
@@ -554,6 +583,7 @@ def main():
         )
     """)
     rows = parse_stations()
+    station_names = {r["name"] for r in rows}
     cur.executemany(
         "INSERT INTO stations VALUES (:name,:region,:address,:start_year,:lat,:lon,:elevation)",
         rows,
@@ -565,7 +595,7 @@ def main():
             bunpu TEXT, note TEXT
         )
     """)
-    rows = parse_kakuritsu_nichi()
+    rows = _normalize_names(parse_kakuritsu_nichi(), station_names)
     cur.executemany(
         "INSERT INTO kakuritsu_nichi VALUES (:name,:region,:nengen,:value_mm,:bunpu,:note)",
         rows,
@@ -576,7 +606,7 @@ def main():
             name TEXT, duration TEXT, nengen INTEGER, value_mm REAL, bunpu TEXT
         )
     """)
-    rows = parse_kakuritsu_jikan()
+    rows = _normalize_names(parse_kakuritsu_jikan(), station_names)
     cur.executemany(
         "INSERT INTO kakuritsu_jikan VALUES (:name,:duration,:nengen,:value_mm,:bunpu)",
         rows,
@@ -587,7 +617,7 @@ def main():
             name TEXT, nengen INTEGER, a REAL, n REAL, b REAL
         )
     """)
-    rows = parse_kyokusen()
+    rows = _normalize_names(parse_kyokusen(), station_names)
     cur.executemany(
         "INSERT INTO kyokusen_keisu VALUES (:name,:nengen,:a,:n,:b)",
         rows,
@@ -600,7 +630,7 @@ def main():
         )
     """)
     for edition, pdfs in [("14", NENMAX_NICHI_14_PDFS), ("15", NENMAX_NICHI_15_PDFS)]:
-        rows = parse_nenmax_nichi(pdfs)
+        rows = _normalize_names(parse_nenmax_nichi(pdfs), station_names)
         for r in rows:
             r["edition"] = edition
         cur.executemany(
@@ -615,7 +645,7 @@ def main():
         )
     """)
     for edition, pdfs in [("14", NENMAX_JIKAN_14_PDFS), ("15", NENMAX_JIKAN_15_PDFS)]:
-        rows = parse_nenmax_jikan_rank1(pdfs)
+        rows = _normalize_names(parse_nenmax_jikan_rank1(pdfs), station_names)
         for r in rows:
             r["edition"] = edition
         cur.executemany(
