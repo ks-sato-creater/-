@@ -163,6 +163,13 @@ def api_station(name):
     })
 
 
+# 強度曲線グラフに実測点として重ねる時間区分(4時間以内。PDF図の表示範囲に合わせる)
+OBSERVED_DURATION_HOURS = {
+    "10分": 10 / 60, "30分": 30 / 60, "60分": 1, "1時間": 1,
+    "2時間": 2, "3時間": 3, "4時間": 4,
+}
+
+
 @app.route("/api/curve/<name>")
 def api_curve(name):
     conn = get_db()
@@ -170,9 +177,25 @@ def api_curve(name):
         "SELECT nengen, a, n, b FROM kyokusen_keisu WHERE name = ? ORDER BY nengen DESC",
         (name,),
     ).fetchall()
+    observed_rows = conn.execute(
+        "SELECT duration, nengen, value_mm FROM kakuritsu_jikan WHERE name = ?",
+        (name,),
+    ).fetchall()
     conn.close()
     if not coeffs:
         return jsonify({"error": "no curve data for this station"}), 404
+
+    # 確率時間雨量表(実測値)を時間(hr)当たりの強度(mm/hr)に換算し、確率年ごとにまとめる。
+    # 曲線式(君島式)はこれらの実測点を含む広い時間帯にわたる回帰式のため、
+    # 短時間側では実測点と曲線がずれることがある(元のPDF図も点と曲線を並記している)。
+    observed_by_nengen = {}
+    for r in observed_rows:
+        h = OBSERVED_DURATION_HOURS.get(r["duration"])
+        if h is None:
+            continue
+        observed_by_nengen.setdefault(r["nengen"], []).append(
+            {"t": h, "i": round(r["value_mm"] / h, 2), "duration": r["duration"]}
+        )
 
     t_values = [round(0.5 + 0.1 * i, 2) for i in range(36)]  # 0.5h〜4.0h
     curves = []
@@ -185,7 +208,8 @@ def api_curve(name):
                 continue
             intensity = a / (denom ** n)
             points.append({"t": t, "i": round(intensity, 2)})
-        curves.append({"nengen": c["nengen"], "points": points})
+        observed = sorted(observed_by_nengen.get(c["nengen"], []), key=lambda p: p["t"])
+        curves.append({"nengen": c["nengen"], "points": points, "observed": observed})
     return jsonify({"name": name, "curves": curves})
 
 
