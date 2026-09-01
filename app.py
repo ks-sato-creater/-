@@ -19,6 +19,9 @@ JIKAN_DURATIONS = [
     "10分", "30分", "60分", "1時間", "2時間", "3時間", "4時間",
     "5時間", "6時間", "8時間", "12時間", "24時間",
 ]
+# 年最大順位表(日雨量・時間雨量とも)の表示上限。
+# 時間雨量側はbuild_db.NENMAX_JIKAN_MAX_RANKと揃えること。
+NENMAX_MAX_RANK = 20
 
 app = Flask(__name__)
 
@@ -94,16 +97,23 @@ def api_station(name):
     # 年最大日雨量順位表(第14編/第15編)。表示が長くなりすぎないよう上位20位まで。
     nenmax_nichi_rows = conn.execute(
         "SELECT edition, rank, value_mm, date FROM nenmax_nichi "
-        "WHERE name = ? AND rank <= 20 ORDER BY edition, rank",
+        "WHERE name = ? AND rank <= ? ORDER BY edition, rank",
+        (name, NENMAX_MAX_RANK),
+    ).fetchall()
+    # 年最大時間雨量順位表(第14編/第15編)。DBには上位20位まで格納してある。
+    nenmax_jikan_rows = conn.execute(
+        "SELECT j.edition, j.rank, j.duration, j.value_mm, j.date, "
+        "       s.filename AS source_file, j.source_page "
+        "FROM nenmax_jikan j LEFT JOIN pdf_sources s ON s.id = j.source_id "
+        "WHERE j.name = ? ORDER BY j.edition, j.rank",
         (name,),
     ).fetchall()
-    # 年最大時間雨量順位表の順位1(過去最大値)。まれに生じる誤抽出の重複行は
-    # MAXで吸収する(正しい値の方が常に大きいことを確認済み)。source_file/source_page は
-    # SQLiteの仕様によりMAX(value_mm)と同じ行の値が採用される。
-    nenmax_jikan_rows = conn.execute(
-        "SELECT edition, duration, MAX(value_mm) AS value_mm, source_file, source_page "
-        "FROM nenmax_jikan_rank1 WHERE name = ? GROUP BY edition, duration",
-        (name,),
+    # 表示範囲(上位20位)の内側で打ち切った時間区分のみ、注意書きの対象にする。
+    # 20位より深い位置での打ち切りは表示に影響しないので出さない。
+    nenmax_jikan_trunc_rows = conn.execute(
+        "SELECT edition, duration, last_valid_rank FROM nenmax_jikan_truncated "
+        "WHERE name = ? AND last_valid_rank < ?",
+        (name, NENMAX_MAX_RANK),
     ).fetchall()
     conn.close()
 
@@ -118,20 +128,34 @@ def api_station(name):
         nenmax_nichi_by_edition.setdefault(r["edition"], []).append(
             {"rank": r["rank"], "value_mm": r["value_mm"], "date": r["date"]}
         )
-    nenmax_jikan_by_edition = {"14": {}, "15": {}}
+    # 「順位 × 時間区分」の表として返す。出典PDFページは時間区分ごとに順位1の行のものを
+    # 代表として添える(その観測所の該当ページを開く目印。深い順位は次ページに続く)。
+    def _empty_edition():
+        return {"rows": {}, "sources": {}, "max_rank": 0, "truncated": {}}
+
+    nenmax_jikan_by_edition = {ed: _empty_edition() for ed in ("14", "15")}
+    for r in nenmax_jikan_trunc_rows:
+        nenmax_jikan_by_edition.setdefault(r["edition"], _empty_edition())[
+            "truncated"
+        ][r["duration"]] = r["last_valid_rank"]
     for r in nenmax_jikan_rows:
-        nenmax_jikan_by_edition.setdefault(r["edition"], {})[r["duration"]] = {
+        ed = nenmax_jikan_by_edition.setdefault(r["edition"], _empty_edition())
+        ed["rows"].setdefault(str(r["rank"]), {})[r["duration"]] = {
             "value_mm": r["value_mm"],
-            "source_file": r["source_file"],
-            "source_page": r["source_page"],
+            "date": r["date"],
         }
+        ed["max_rank"] = max(ed["max_rank"], r["rank"])
+        if r["rank"] == 1:
+            ed["sources"][r["duration"]] = {
+                "source_file": r["source_file"],
+                "source_page": r["source_page"],
+            }
 
     def _first_available(d, key):
         for ed in ("15", "14"):
-            entry = d.get(ed, {}).get(key) if isinstance(d.get(ed), dict) else None
-            v = entry["value_mm"] if entry else None
-            if v is not None:
-                return v
+            entry = d.get(ed, {}).get("rows", {}).get("1", {}).get(key)
+            if entry and entry["value_mm"] is not None:
+                return entry["value_mm"]
         return None
 
     nenmax_nichi_rank1_value = next(

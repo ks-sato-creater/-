@@ -7,6 +7,7 @@
 import io
 import re
 import sqlite3
+from collections import defaultdict
 from pathlib import Path
 
 import pdfplumber
@@ -30,6 +31,8 @@ NENMAX_NICHI_15_PDFS = [
 ]
 NENMAX_JIKAN_14_PDFS = [SRC_DIR / "ooame14-1_3-1.pdf", SRC_DIR / "ooame14-1_3-2.pdf"]
 NENMAX_JIKAN_15_PDFS = [SRC_DIR / "第15編_005_年最大時間雨量順位表.pdf"]
+# 年最大時間雨量順位表としてDB/アプリに載せる順位の上限
+NENMAX_JIKAN_MAX_RANK = 20
 
 KYOKUSEN_NENGEN = [200, 100, 70, 50, 30, 20, 10, 7, 5, 3]
 # グラフの軸ラベル等、駅観測所名として誤検出しないための除外語
@@ -341,137 +344,6 @@ def _topmost_group(words, pred, top_tol=3):
     return row
 
 
-def parse_nenmax_jikan_rank1(pdf_paths):
-    """年最大時間雨量順位表から、各観測所・各時間区分の順位1(過去最大値)だけを取得する。
-    この表は1観測所のデータが複数ページ(短時間側10分〜3時間+長時間側4時間〜24時間の
-    ページが交互に、かつ観測所によって必要ページ数が変わる形)にまたがるため、
-    全順位を追うには複雑なページ跨ぎの継続判定が必要になる。順位1だけであれば、
-    「観測所名の直後に現れる最初のデータ行」が必ず順位1であることを使い、
-    対応する長時間側ページの先頭データ行(同じ相対位置)と組み合わせるだけでよい。"""
-    rows_out = []
-    current_region = None
-    pages_all = []
-    page_source = []  # pages_all と同じ並びで (元ファイル名, ファイル内ページ番号) を記録
-    opened = [pdfplumber.open(p) for p in pdf_paths]
-    for pdf, path in zip(opened, pdf_paths):
-        pages_all.extend(pdf.pages)
-        fname = Path(path).name
-        page_source.extend((fname, n) for n in range(1, len(pdf.pages) + 1))
-
-    try:
-        i = 0
-        while i < len(pages_all):
-            words = pages_all[i].extract_words()
-            if not words:
-                i += 1
-                continue
-            rank_words = [w for w in words if w["text"] == "順位"]
-            is_short_page = bool(rank_words) and any(
-                w["text"] == "時間" and w["x0"] < 100 for w in words
-            )
-            if not is_short_page:
-                i += 1
-                continue
-
-            region_word = next((w["text"] for w in words if "振興局" in w["text"]), None)
-            if region_word:
-                current_region = region_word
-
-            header_dur_words = _topmost_group(words, lambda w: DURATION_TOKEN_RE.match(w["text"]))
-            durations_short = [w["text"] for w in header_dur_words]
-
-            # 「順位」ヘッダ行より下だけを本文行として扱う(絶対座標には依存しない)
-            rank_header_top = min(w["top"] for w in rank_words)
-            body_rows = _rows_from_words(
-                [w for w in words if w["top"] > rank_header_top + 3], top_tol=3
-            )
-
-            data_row_idx = -1
-            pending_station = None
-            station_at_index = {}  # data_row_idx(0始まり) -> 観測所名(順位1の行のみ記録)
-            for _, cells in body_rows:
-                texts = [c[1] for c in cells]
-                if not cells:
-                    continue
-                if not cells[0][1].isdigit():
-                    label = _station_label_from_row(texts)
-                    if label:
-                        pending_station = label
-                    continue  # ヘッダ行やラベル行(数値データではない)
-                data_row_idx += 1
-                if pending_station is None:
-                    continue  # 順位2以降の行(順位1のみ対象なのでスキップ)
-                station_name = pending_station
-                station_at_index[data_row_idx] = station_name
-                pending_station = None
-
-                # 順位1行なので、この行(短時間側)の値をそのまま記録
-                vals = [c[1] for c in cells[1:]]
-                for di, dur in enumerate(durations_short):
-                    base = di * 4
-                    if base >= len(vals):
-                        break
-                    rain = vals[base]
-                    try:
-                        rain_val = int(rain)
-                    except ValueError:
-                        continue
-                    rows_out.append({
-                        "name": station_name,
-                        "region": current_region,
-                        "duration": dur,
-                        "value_mm": rain_val,
-                        "source_file": page_source[i][0],
-                        "source_page": page_source[i][1],
-                    })
-
-            # 対応する長時間側(続き)ページ: 直後のページで、見出しが「N時間」のみ
-            # (「順位」列が無い)ものを1件だけ消費する
-            if i + 1 < len(pages_all) and station_at_index:
-                long_words = pages_all[i + 1].extract_words()
-                has_rank_col = any(w["text"] == "順位" for w in long_words)
-                long_dur_words = _topmost_group(long_words, lambda w: DURATION_TOKEN_RE.match(w["text"]))
-                is_long_page = bool(long_words) and not has_rank_col and bool(long_dur_words)
-                if is_long_page:
-                    durations_long = [w["text"] for w in long_dur_words]
-                    dur_header_top = long_dur_words[0]["top"]
-                    subheader_words = [w for w in long_words if w["text"] in ("雨量", "年月日")]
-                    subheader_top = (
-                        min(w["top"] for w in subheader_words) if subheader_words else dur_header_top + 10
-                    )
-                    long_body_rows = _rows_from_words(
-                        [w for w in long_words if w["top"] > subheader_top + 3], top_tol=3
-                    )
-                    for ri, (_, cells) in enumerate(long_body_rows):
-                        if ri not in station_at_index:
-                            continue
-                        name = station_at_index[ri]
-                        vals = [c[1] for c in cells]
-                        for di, dur in enumerate(durations_long):
-                            base = di * 4
-                            if base >= len(vals):
-                                break
-                            rain = vals[base]
-                            try:
-                                rain_val = int(rain)
-                            except ValueError:
-                                continue
-                            rows_out.append({
-                                "name": name, "region": current_region,
-                                "duration": dur, "value_mm": rain_val,
-                                "source_file": page_source[i + 1][0],
-                                "source_page": page_source[i + 1][1],
-                            })
-                    i += 1  # 長時間側ページも消費済み
-            i += 1
-    finally:
-        for pdf in opened:
-            pdf.close()
-
-    print(f"nenmax_jikan_rank1 rows parsed: {len(rows_out)} from {[p.name for p in pdf_paths]}")
-    return rows_out
-
-
 def _extract_duration_values(cells, header_words, durations):
     """1行分のセル(x0付き)を、時間区分の見出しx0を基準に区分ごとへ振り分けて
     (雨量, 年月日)を取り出す。年月日の内訳(元号/年/月日)はpdfplumberの単語分割の
@@ -508,12 +380,13 @@ def _extract_duration_values(cells, header_words, durations):
 
 
 def parse_nenmax_jikan_all(pdf_paths):
-    """年最大時間雨量順位表の全順位を取得する(Excel出力専用。rainfall.db/Webアプリには
-    組み込まない)。parse_nenmax_jikan_rank1と同じページ構成(短時間側ページ+直後の
-    長時間側続きページ)を読むが、以下の点が異なる:
+    """年最大時間雨量順位表の全順位を取得する。短時間側ページ+直後の長時間側続きページ
+    という構成を読む。
     - 観測所名は「次の観測所名ラベルが現れるまで」ページをまたいで持ち越す
       (1観測所の順位が1ページ(組)に収まらない場合、次ページの続きも同じ観測所として扱う)。
-    - 順位1に限らず全ての行を対象とし、雨量値とあわせて年月日も記録する。"""
+    - 順位1に限らず全ての行を対象とし、雨量値とあわせて年月日も記録する。
+    抽出結果はそのまま使わず、truncate_non_monotonic()で行ずれ疑いの箇所を
+    切り落としてから利用すること。"""
     rows_out = []
     current_region = None
     current_station = None
@@ -623,6 +496,47 @@ def parse_nenmax_jikan_all(pdf_paths):
 
     print(f"nenmax_jikan_all rows parsed: {len(rows_out)} from {[p.name for p in pdf_paths]}")
     return rows_out
+
+
+def truncate_non_monotonic(rows):
+    """順位が進んでも雨量は単調減少のはず、という前提が崩れた時点(=ページ跨ぎの
+    行ずれが疑われる箇所)以降を切り捨てる。戻り値は(採用した行, 打ち切り箇所の一覧)。
+    打ち切り箇所には、元PDFで確認する際の目印として前後の出典ページも添える。
+
+    行ずれが起きるのは、統計期間が長く順位表が複数ページ組にまたがる観測所で、
+    継続ページの一部行が完全に空白(欠測)になり、短時間側ページと長時間側ページの
+    行対応が崩れるケース。また、道内で同名の別観測所(例:朝日、川汲)が
+    名寄せで1つにまとまってしまうケースでも同じ検出に引っかかる。"""
+    by_key = defaultdict(list)
+    for r in rows:
+        by_key[(r["name"], r["duration"])].append(r)
+    out = []
+    truncations = []
+    for (name, duration), rs in by_key.items():
+        rs.sort(key=lambda r: r["rank"])
+        prev = None
+        cut_at = None
+        for idx, r in enumerate(rs):
+            if prev is not None and r["value_mm"] > prev:
+                cut_at = idx
+                break
+            out.append(r)
+            prev = r["value_mm"]
+        if cut_at is not None:
+            last_valid = rs[cut_at - 1]
+            first_dropped = rs[cut_at]
+            truncations.append({
+                "name": name,
+                "duration": duration,
+                "last_valid_rank": last_valid["rank"],
+                "last_valid_source_file": last_valid["source_file"],
+                "last_valid_source_page": last_valid["source_page"],
+                "dropped_count": len(rs) - cut_at,
+                "first_dropped_rank": first_dropped["rank"],
+                "first_dropped_source_file": first_dropped["source_file"],
+                "first_dropped_source_page": first_dropped["source_page"],
+            })
+    return out, truncations
 
 
 def parse_kyokusen():
@@ -896,21 +810,50 @@ def main():
             rows,
         )
 
+    # 出典PDFのファイル名は同じ長い文字列が数万行に繰り返され、そのままだと
+    # DBが数MB膨らむため、参照表に切り出してIDで持つ。
+    cur.execute("CREATE TABLE pdf_sources (id INTEGER PRIMARY KEY, filename TEXT)")
     cur.execute("""
-        CREATE TABLE nenmax_jikan_rank1 (
-            edition TEXT, name TEXT, region TEXT, duration TEXT, value_mm INTEGER,
-            source_file TEXT, source_page INTEGER
+        CREATE TABLE nenmax_jikan (
+            edition TEXT, name TEXT, rank INTEGER, duration TEXT,
+            value_mm INTEGER, date TEXT, source_id INTEGER, source_page INTEGER
         )
     """)
+    cur.execute("CREATE INDEX idx_nenmax_jikan_name ON nenmax_jikan (name, edition)")
+    # 行ずれ検出で打ち切った箇所。順位表が短いのが「資料自体に記録が無いから」なのか
+    # 「抽出の都合で切ったから」なのかをアプリ側で区別するために持つ。
+    cur.execute("""
+        CREATE TABLE nenmax_jikan_truncated (
+            edition TEXT, name TEXT, duration TEXT, last_valid_rank INTEGER
+        )
+    """)
+    source_ids = {}
     for edition, pdfs in [("14", NENMAX_JIKAN_14_PDFS), ("15", NENMAX_JIKAN_15_PDFS)]:
-        rows = _normalize_names(parse_nenmax_jikan_rank1(pdfs), station_names)
+        rows = _normalize_names(parse_nenmax_jikan_all(pdfs), station_names)
+        rows, truncations = truncate_non_monotonic(rows)
+        cur.executemany(
+            "INSERT INTO nenmax_jikan_truncated VALUES (?,?,?,?)",
+            [(edition, t["name"], t["duration"], t["last_valid_rank"]) for t in truncations],
+        )
+        # アプリで表示するのは上位のみ。全順位を持つとDBが数倍に膨らむため絞る
+        # (深い順位が必要な場合はexport_jikan_ranking_excel.pyでExcel化して参照する)。
+        rows = [r for r in rows if r["rank"] <= NENMAX_JIKAN_MAX_RANK]
         for r in rows:
             r["edition"] = edition
+            r["source_id"] = source_ids.setdefault(r["source_file"], len(source_ids) + 1)
         cur.executemany(
-            "INSERT INTO nenmax_jikan_rank1 VALUES "
-            "(:edition,:name,:region,:duration,:value_mm,:source_file,:source_page)",
+            "INSERT INTO nenmax_jikan VALUES "
+            "(:edition,:name,:rank,:duration,:value_mm,:date,:source_id,:source_page)",
             rows,
         )
+        print(
+            f"nenmax_jikan(第{edition}編) stored: {len(rows)} rows "
+            f"(rank<={NENMAX_JIKAN_MAX_RANK}), truncated groups: {len(truncations)}"
+        )
+    cur.executemany(
+        "INSERT INTO pdf_sources VALUES (?,?)",
+        [(sid, fname) for fname, sid in source_ids.items()],
+    )
 
     conn.commit()
     conn.close()
