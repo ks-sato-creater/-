@@ -149,20 +149,57 @@ function renderNenmaxNichiTable(edition) {
 
 function renderNenmaxJikanTable(edition) {
   const table = document.getElementById("table-nenmax-jikan");
-  const row = (currentStationData && currentStationData.nenmax_jikan[edition]) || {};
-  const thead = `<tr>${NENMAX_JIKAN_DURATIONS.map((d) => `<th>${d}</th>`).join("")}</tr>`;
-  const hasAny = Object.keys(row).length > 0;
-  const tbody = hasAny
-    ? `<tr>${NENMAX_JIKAN_DURATIONS.map((d) => `<td>${row[d] ? row[d].value_mm : "-"}</td>`).join("")}</tr>`
-    : `<tr><td colspan="${NENMAX_JIKAN_DURATIONS.length}">第${edition}編のデータがありません</td></tr>`;
-  const sourceRow = hasAny
-    ? `<tr class="source-row">${NENMAX_JIKAN_DURATIONS.map((d) => {
-        const cell = row[d];
-        return `<td>${cell ? `${cell.source_file} p.${cell.source_page}` : "-"}</td>`;
+  const data = (currentStationData && currentStationData.nenmax_jikan[edition]) || {};
+  const rowsByRank = data.rows || {};
+  const sources = data.sources || {};
+  const maxRank = data.max_rank || 0;
+
+  const thead =
+    `<tr><th>順位</th>${NENMAX_JIKAN_DURATIONS.map((d) => `<th>${d}</th>`).join("")}</tr>`;
+
+  // 抽出時に行ずれを検出して打ち切った時間区分だけ注意書きを出す。
+  // 単に順位が20位まで無い観測所(資料自体に記録が無い)は正常なので何も出さない。
+  const warn = document.getElementById("nenmax-jikan-warn");
+  const truncated = data.truncated || {};
+  const truncatedDurations = NENMAX_JIKAN_DURATIONS.filter((d) => truncated[d]);
+  if (truncatedDurations.length) {
+    warn.textContent =
+      `次の時間区分は、元PDFの順位表でデータの整合が取れなくなる箇所を検出したため、` +
+      `途中で打ち切っています: ` +
+      truncatedDurations.map((d) => `${d}(${truncated[d]}位まで)`).join("、") +
+      `。複数ページにまたがる観測所での欠測行、または道内に同名の別観測所がある場合に起こります。` +
+      `以降の順位が必要な場合は、最下段の出典ページで元PDFをご確認ください。`;
+    warn.classList.remove("hidden");
+  } else {
+    warn.classList.add("hidden");
+  }
+
+  let tbody;
+  if (maxRank === 0) {
+    tbody = `<tr><td colspan="${NENMAX_JIKAN_DURATIONS.length + 1}">第${edition}編のデータがありません</td></tr>`;
+  } else {
+    const body = [];
+    for (let rank = 1; rank <= maxRank; rank++) {
+      const cells = rowsByRank[rank] || {};
+      const tds = NENMAX_JIKAN_DURATIONS.map((d) => {
+        const cell = cells[d];
+        if (!cell) return "<td>-</td>";
+        // 雨量の下に年月日を小さく添える(元PDFと同じ「雨量＋年月日」の組)
+        return `<td>${cell.value_mm}<span class="cell-date">${cell.date || ""}</span></td>`;
+      }).join("");
+      body.push(`<tr><th>${rank}</th>${tds}</tr>`);
+    }
+    // 出典は時間区分ごとに順位1の行のページを代表として示す
+    body.push(
+      `<tr class="source-row"><th>出典</th>${NENMAX_JIKAN_DURATIONS.map((d) => {
+        const s = sources[d];
+        return `<td>${s ? `${s.source_file} p.${s.source_page}` : "-"}</td>`;
       }).join("")}</tr>`
-    : "";
+    );
+    tbody = body.join("");
+  }
   table.querySelector("thead").innerHTML = thead;
-  table.querySelector("tbody").innerHTML = tbody + sourceRow;
+  table.querySelector("tbody").innerHTML = tbody;
 }
 
 document.querySelectorAll(".edition-tab").forEach((btn) => {

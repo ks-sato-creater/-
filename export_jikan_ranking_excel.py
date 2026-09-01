@@ -1,19 +1,17 @@
 """
 年最大時間雨量順位表(第14編・第15編)を、観測所ごと・編ごとのシートに分けた
-Excelファイルに変換する。rainfall.db/Webアプリとは独立したツール。
+Excelファイルに変換する。Webアプリの起動には不要な、単体で実行するツール。
+(Webアプリは同じ抽出結果を上位20位までrainfall.dbに載せて表示する。
+それより深い順位が必要なときにこのExcelを使う。)
 
 PDFは各観測所の順位1件ごとに5列(順位/雨量/年/月/日)×12時間区分という
 非常に横長のレイアウトをA4縦に収めるため独特な構成になっており閲覧しにくい。
 ここでは観測所単位でシートを分け、行=順位、列=時間区分(雨量・年月日)という
 見やすい形に組み直す。
 
-既知の制約: ごく一部の統計期間が長い観測所では、順位表が複数ページ組にまたがり、
-継続ページの一部行が完全に空白(欠測)になることがある。その場合、短時間側ページと
-長時間側(続き)ページの行対応がずれ、深い順位(概ね順位90位以降)のデータが
-誤った年月日と組み合わさることがある。これを検出するため、順位が進むほど雨量が
-単調に減少するはずという前提で、逆転が起きた時点以降を打ち切って出力する
-(_truncate_non_monotonic)。影響は既知の範囲でおよそ全体の0.3%の行(145/2771観測所
-×時間区分の組)に限られ、浅い順位(実務上よく使われる範囲)には影響しない。
+既知の制約と、それを打ち切って出力する仕組みは build_db.truncate_non_monotonic()
+を参照。打ち切りが起きた箇所は「要確認(順位ずれ)」シートに一覧化するので、
+深い順位が必要な場合はそこに記載した出典ページで元PDFを確認する。
 """
 from collections import defaultdict
 
@@ -27,42 +25,6 @@ DURATIONS = [
     "4時間", "5時間", "6時間", "8時間", "12時間", "24時間",
 ]
 OUT_PATH = build_db.OUT_DIR / "年最大時間雨量順位表.xlsx"
-
-
-def _truncate_non_monotonic(rows):
-    """順位が進んでも雨量は単調減少のはず、という前提が崩れた時点(=ページ跨ぎの
-    行ずれが疑われる箇所)以降を切り捨てる。戻り値は(採用した行, 打ち切り箇所の一覧)。
-    打ち切り箇所には、元PDFで確認する際の目印として直前の有効行の出典ページも添える。"""
-    by_key = defaultdict(list)
-    for r in rows:
-        by_key[(r["name"], r["duration"])].append(r)
-    out = []
-    truncations = []
-    for (name, duration), rs in by_key.items():
-        rs.sort(key=lambda r: r["rank"])
-        prev = None
-        cut_at = None
-        for idx, r in enumerate(rs):
-            if prev is not None and r["value_mm"] > prev:
-                cut_at = idx
-                break
-            out.append(r)
-            prev = r["value_mm"]
-        if cut_at is not None:
-            last_valid = rs[cut_at - 1]
-            first_dropped = rs[cut_at]
-            truncations.append({
-                "name": name,
-                "duration": duration,
-                "last_valid_rank": last_valid["rank"],
-                "last_valid_source_file": last_valid["source_file"],
-                "last_valid_source_page": last_valid["source_page"],
-                "dropped_count": len(rs) - cut_at,
-                "first_dropped_rank": first_dropped["rank"],
-                "first_dropped_source_file": first_dropped["source_file"],
-                "first_dropped_source_page": first_dropped["source_page"],
-            })
-    return out, truncations
 
 
 def _sanitize_sheet_name(name):
@@ -176,7 +138,7 @@ def main():
     for edition_label, pdfs in [("14", build_db.NENMAX_JIKAN_14_PDFS), ("15", build_db.NENMAX_JIKAN_15_PDFS)]:
         rows = build_db.parse_nenmax_jikan_all(pdfs)
         rows = build_db._normalize_names(rows, station_names)
-        rows, truncations = _truncate_non_monotonic(rows)
+        rows, truncations = build_db.truncate_non_monotonic(rows)
         for t in truncations:
             t["edition"] = edition_label
         all_truncations.extend(truncations)

@@ -114,10 +114,32 @@ table th { background: #f0f0f0; }
   margin: 2px 0 6px;
 }
 
-.source-row td {
+.source-row td, .source-row th {
   font-size: 0.85em;
   color: #888;
   font-style: italic;
   font-weight: normal;
   white-space: normal;
+}
+
+.warn {
+  font-size: 0.8em;
+  color: #8a5300;
+  background: #fdf4e3;
+  border: 1px solid #f0dcb4;
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 2px 0 6px;
+}
+
+/* 年最大時間雨量順位表: 1セルに「雨量」と「年月日」を2段で収める */
+.cell-date {
+  display: block;
+  font-size: 0.82em;
+  color: #888;
+  font-weight: normal;
+}
+#table-nenmax-jikan tbody th {
+  background: #f0f0f0;
+  text-align: right;
 }
